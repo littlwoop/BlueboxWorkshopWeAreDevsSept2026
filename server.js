@@ -8,6 +8,25 @@ const paymentUrl = process.env.PAYMENT_URL || 'http://localhost:4004';
 const postgrestUrl = process.env.POSTGREST_URL || 'http://localhost:3000';
 const databasePoolSize = Number(process.env.DATABASE_POOL_SIZE || 32);
 const databaseRequestDelayMs = Number(process.env.DATABASE_REQUEST_DELAY_MS || 0);
+const featuredSaleProductIds = new Set(['orbit-lamp', 'night-hoodie']);
+
+const calculateSalePrice = (product = {}) => {
+  const originalPriceCents = Number(product.priceCents ?? product.price_cents ?? 0);
+  const isOnSale = Boolean(product.isOnSale ?? product.is_on_sale ?? featuredSaleProductIds.has(product.id));
+  const salePercent = Number(product.salePercent ?? product.sale_percent ?? (isOnSale ? 20 : 0));
+  const safePercent = Number.isFinite(salePercent) && salePercent > 0 ? Math.min(salePercent, 100) : 0;
+  const salePriceCents = isOnSale && safePercent > 0 ? Math.round(originalPriceCents * (100 - safePercent) / 100) : originalPriceCents;
+
+  return {
+    ...product,
+    originalPriceCents,
+    priceCents: salePriceCents,
+    salePriceCents,
+    isOnSale,
+    salePercent: safePercent,
+    saleBadgeText: isOnSale && safePercent > 0 ? 'Flash Sale' : '',
+  };
+};
 
 const createDatabaseLimiter = ({ poolSize = 32 } = {}) => {
   if (!Number.isInteger(poolSize) || poolSize < 1) {
@@ -47,11 +66,11 @@ const databaseLimiter = createDatabaseLimiter({ poolSize: databasePoolSize });
 const products = [
   { id: 'aurora-mug', name: 'Aurora Field Mug', description: 'A durable enamel mug for early starts and late ideas.', priceCents: 2400, category: 'Desk', emoji: '☕' },
   { id: 'signal-notebook', name: 'Signal Notebook', description: 'Dot-grid pages for diagrams, traces, and half-formed plans.', priceCents: 1800, category: 'Desk', emoji: '📓' },
-  { id: 'orbit-lamp', name: 'Orbit Desk Lamp', description: 'A warm, adjustable glow for focused work.', priceCents: 6400, category: 'Studio', emoji: '💡' },
+  { id: 'orbit-lamp', name: 'Orbit Desk Lamp', description: 'A warm, adjustable glow for focused work.', priceCents: 6400, category: 'Studio', emoji: '💡', isOnSale: true, salePercent: 20 },
   { id: 'cloud-socks', name: 'Cloudline Socks', description: 'Soft merino socks for long pairing sessions.', priceCents: 1600, category: 'Wear', emoji: '🧦' },
   { id: 'field-bag', name: 'Field Notes Bag', description: 'A compact canvas carry for your everyday kit.', priceCents: 5200, category: 'Carry', emoji: '👜' },
-  { id: 'night-hoodie', name: 'Night Shift Hoodie', description: 'A heavyweight layer for cool offices and warmer thinking.', priceCents: 7200, category: 'Wear', emoji: '🧥' },
-];
+  { id: 'night-hoodie', name: 'Night Shift Hoodie', description: 'A heavyweight layer for cool offices and warmer thinking.', priceCents: 7200, category: 'Wear', emoji: '🧥', isOnSale: true, salePercent: 20 },
+].map(calculateSalePrice);
 
 const send = (res, status, value, type = 'application/json') => { res.writeHead(status, { 'content-type': type }); res.end(type === 'application/json' ? JSON.stringify(value) : value); };
 const readBody = req => new Promise((resolve, reject) => { let value = ''; req.on('data', chunk => { value += chunk; }); req.on('end', () => resolve(value ? JSON.parse(value) : {})); req.on('error', reject); });
@@ -69,7 +88,7 @@ const database = async (url, options = {}) => {
     databaseLimiter.release();
   }
 };
-const mapProduct = product => ({ ...product, priceCents: product.price_cents, price_cents: undefined });
+const mapProduct = product => calculateSalePrice({ ...product, priceCents: Number(product.priceCents ?? product.price_cents ?? 0), price_cents: undefined });
 const cart = userId => database(`/carts?user_id=eq.${encodeURIComponent(userId)}&select=quantity,products(*)`).then(items => items.map(item => ({ product: mapProduct(item.products), quantity: item.quantity })));
 
 async function route(req, res, url) {
@@ -115,4 +134,4 @@ if (require.main === module) {
   startServer();
 }
 
-module.exports = { createDatabaseLimiter, route, startServer };
+module.exports = { createDatabaseLimiter, calculateSalePrice, route, startServer };
