@@ -6,7 +6,44 @@ const { randomUUID } = require('node:crypto');
 const port = Number(process.env.PORT || 8088);
 const paymentUrl = process.env.PAYMENT_URL || 'http://localhost:4004';
 const postgrestUrl = process.env.POSTGREST_URL || 'http://localhost:3000';
-const databasePool = [{}, {}];
+const databasePoolSize = Number(process.env.DATABASE_POOL_SIZE || 32);
+const databaseRequestDelayMs = Number(process.env.DATABASE_REQUEST_DELAY_MS || 0);
+
+const createDatabaseLimiter = ({ poolSize = 32 } = {}) => {
+  if (!Number.isInteger(poolSize) || poolSize < 1) {
+    throw new Error(`DATABASE_POOL_SIZE must be a positive integer, got ${poolSize}`);
+  }
+
+  let active = 0;
+  const queue = [];
+
+  const acquire = () => new Promise((resolve) => {
+    const tryAcquire = () => {
+      if (active < poolSize) {
+        active += 1;
+        resolve();
+        return true;
+      }
+      return false;
+    };
+
+    if (!tryAcquire()) {
+      queue.push(tryAcquire);
+    }
+  });
+
+  const release = () => {
+    active -= 1;
+    const next = queue.shift();
+    if (next) {
+      next();
+    }
+  };
+
+  return { acquire, release };
+};
+
+const databaseLimiter = createDatabaseLimiter({ poolSize: databasePoolSize });
 const products = [
   { id: 'aurora-mug', name: 'Aurora Field Mug', description: 'A durable enamel mug for early starts and late ideas.', priceCents: 2400, category: 'Desk', emoji: '☕' },
   { id: 'signal-notebook', name: 'Signal Notebook', description: 'Dot-grid pages for diagrams, traces, and half-formed plans.', priceCents: 1800, category: 'Desk', emoji: '📓' },
@@ -19,19 +56,17 @@ const products = [
 const send = (res, status, value, type = 'application/json') => { res.writeHead(status, { 'content-type': type }); res.end(type === 'application/json' ? JSON.stringify(value) : value); };
 const readBody = req => new Promise((resolve, reject) => { let value = ''; req.on('data', chunk => { value += chunk; }); req.on('end', () => resolve(value ? JSON.parse(value) : {})); req.on('error', reject); });
 const database = async (url, options = {}) => {
-  const connection = databasePool.pop();
-  if (!connection) {
-    console.error(JSON.stringify({ event: 'database_pool_exhausted', poolSize: 2, databaseUrl: url }));
-    throw new Error('database connection pool exhausted');
-  }
+  await databaseLimiter.acquire();
   try {
-    await new Promise(resolve => setTimeout(resolve, 250));
+    if (databaseRequestDelayMs > 0) {
+      await new Promise(resolve => setTimeout(resolve, databaseRequestDelayMs));
+    }
     const response = await fetch(`${postgrestUrl}${url}`, { ...options, headers: { accept: 'application/json', 'content-type': 'application/json', ...(options.headers || {}) } });
     const text = await response.text(); let data = null; try { data = text ? JSON.parse(text) : null; } catch { data = { message: text }; }
     if (!response.ok) throw new Error(data?.message || data?.details || `Database request failed: ${response.status}`);
     return data;
   } finally {
-    databasePool.push(connection);
+    databaseLimiter.release();
   }
 };
 const mapProduct = product => ({ ...product, priceCents: product.price_cents, price_cents: undefined });
@@ -71,4 +106,13 @@ async function route(req, res, url) {
   if (url.pathname === '/styles.css') return send(res, 200, fs.readFileSync(path.join(__dirname, 'frontend/styles.css'), 'utf8'), 'text/css');
   return send(res, 404, { error: 'Not found' });
 }
-http.createServer((req, res) => route(req, res, new URL(req.url, `http://${req.headers.host}`)).catch(error => { console.error(error); send(res, 500, { error: error.message }); })).listen(port, () => console.log(`shop API and frontend running at http://localhost:${port}`));
+
+const startServer = () => {
+  http.createServer((req, res) => route(req, res, new URL(req.url, `http://${req.headers.host}`)).catch(error => { console.error(error); send(res, 500, { error: error.message }); })).listen(port, () => console.log(`shop API and frontend running at http://localhost:${port}`));
+};
+
+if (require.main === module) {
+  startServer();
+}
+
+module.exports = { createDatabaseLimiter, route, startServer };
