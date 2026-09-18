@@ -1,7 +1,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { createDatabaseLimiter } = require('./server');
+const { createDatabaseLimiter, calculateSalePrice } = require('./server');
 
 test('database limiter queues work instead of dropping requests when the pool is saturated', async () => {
   const limiter = createDatabaseLimiter({ poolSize: 2 });
@@ -24,4 +24,13 @@ test('database limiter queues work instead of dropping requests when the pool is
   const results = await Promise.all(tasks);
   assert.deepEqual(results, [0, 1, 2, 3]);
   assert.equal(maxInFlight, 2, 'the limiter should never exceed the configured pool size');
+});
+
+test('flash sale pricing applies a 20% discount to featured items', () => {
+  const product = calculateSalePrice({ id: 'aurora-mug', priceCents: 2400, isOnSale: true, salePercent: 20 });
+
+  assert.equal(product.originalPriceCents, 2400);
+  assert.equal(product.salePriceCents, 1920);
+  assert.equal(product.priceCents, 1920);
+  assert.equal(product.isOnSale, true);
 });
